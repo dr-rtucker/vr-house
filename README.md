@@ -12,7 +12,7 @@ static files.
 
 ## Viewing it
 
-Live at **https://dr-rtucker.github.io/vr-house/house.html**
+Live at **https://www.rileytucker.com/vr-house/house.html**
 
 Because that is real HTTPS, WebXR works with no browser flags. On the phone, use
 Chrome's *Add to Home Screen* — a service worker precaches every file, so after one
