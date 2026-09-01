@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0d0c">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Grass Field VR</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d0c; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; inset: auto 0 0 0; padding: 18px;
+    display: flex; gap: 10px; justify-content: center; align-items: center;
+    font: 500 15px/1.4 system-ui, -apple-system, sans-serif;
+    pointer-events: none;
+  }
+  button {
+    pointer-events: auto;
+    font: inherit; padding: 14px 22px; border: 0; border-radius: 999px;
+    background: #e8ece8; color: #141a16; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  #hint {
+    position: fixed; top: 0; left: 0; right: 0; padding: 16px;
+    text-align: center; color: #c9d2cb; pointer-events: none;
+    font: 400 13px/1.5 system-ui, -apple-system, sans-serif; text-shadow: 0 1px 3px #000;
+  }
+</style>
+</head>
+<body>
+<div id="hint"></div>
+<div id="ui"><button id="vr" disabled>checking VR…</button></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "./lib/three.module.min.js"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------------------------------------------------------------- tuning
+const GRASS_BLADES = 40000;   // one draw call; drop to ~20000 on a weak phone
+const GRASS_PATCH  = 70;      // metres square, wrapped around the player = endless field
+const FOG_DENSITY  = 0.028;
+const WALK_SPEED   = 2.4;     // m/s
+const EYE_HEIGHT   = 1.6;
+
+// ---------------------------------------------------------------- basics
+const scene = new THREE.Scene();
+const SKY_LOW  = new THREE.Color('#b9c4bc');
+const SKY_HIGH = new THREE.Color('#5d7080');
+scene.fog = new THREE.FogExp2(SKY_LOW.clone().lerp(SKY_HIGH, 0.15), FOG_DENSITY);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.95;
+document.body.appendChild(renderer.domElement);
+
+// `player` is the thing we move; the XR headset pose is applied inside it.
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 400);
+const player = new THREE.Group();
+player.add(camera);
+scene.add(player);
+camera.position.y = EYE_HEIGHT;   // ignored once a real XR floor pose exists
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------------------------------------------------------------- sky dome
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(300, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { low: { value: SKY_LOW }, high: { value: SKY_HIGH } },
+    vertexShader: `varying float vH;
+      void main(){ vH = normalize(position).y;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    fragmentShader: `varying float vH; uniform vec3 low; uniform vec3 high;
+      void main(){ gl_FragColor = vec4(mix(low, high, smoothstep(-0.05, 0.6, vH)), 1.0); }`
+  })
+);
+sky.frustumCulled = false;
+scene.add(sky);
+
+// ---------------------------------------------------------------- lights
+scene.add(new THREE.HemisphereLight(0xdfe7e0, 0x46503a, 1.05));
+const sun = new THREE.DirectionalLight(0xfff2dd, 0.9);
+sun.position.set(-40, 55, 25);
+scene.add(sun);
+
+// ---------------------------------------------------------------- ground
+const ground = new THREE.Mesh(
+  // Tessellated on purpose: fog depth is a per-vertex varying, so a two-triangle
+  // (or centre-fan) ground interpolates it wrong and fogs out the plane completely.
+  new THREE.PlaneGeometry(520, 520, 48, 48).rotateX(-Math.PI / 2),
+  new THREE.MeshLambertMaterial({ color: 0x3d4a2a })
+);
+scene.add(ground);
+
+// ---------------------------------------------------------------- grass
+// One tapered blade, 4 triangles, base pivot at origin.
+const blade = new THREE.PlaneGeometry(0.14, 1, 1, 3).translate(0, 0.5, 0);
+{ // taper the blade toward the tip
+  const p = blade.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const y = p.getY(i);
+    p.setX(i, p.getX(i) * (1 - y * 0.85));
+  }
+  p.needsUpdate = true;
+  blade.computeVertexNormals();
+}
+
+const grassUniforms = {
+  uTime:   { value: 0 },
+  uPlayer: { value: new THREE.Vector3() },
+  uPatch:  { value: GRASS_PATCH }
+};
+const grassMat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+grassMat.onBeforeCompile = (shader) => {
+  shader.uniforms.uTime   = grassUniforms.uTime;
+  shader.uniforms.uPlayer = grassUniforms.uPlayer;
+  shader.uniforms.uPatch  = grassUniforms.uPatch;
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+      uniform float uTime; uniform vec3 uPlayer; uniform float uPatch;
+      vec3 gWrap;`)
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      // Wrap each blade into a square patch centred on the player, so the field is
+      // endless from one InstancedMesh. Applied after instanceMatrix, in project_vertex.
+      vec3 iPos = instanceMatrix[3].xyz;
+      vec2 rel  = iPos.xz - uPlayer.xz;
+      vec2 wrp  = mod(rel + uPatch * 0.5, uPatch) - uPatch * 0.5;
+      gWrap = vec3(wrp.x - rel.x, 0.0, wrp.y - rel.y);
+
+      // wind phase from the wrapped position so the waves stay spatially coherent
+      vec2 wPos = uPlayer.xz + wrp;
+      float phase = wPos.x * 0.18 + wPos.y * 0.13;
+      float swell   = sin(uTime * 0.55 + phase) * 0.6;
+      float flutter = sin(uTime * 2.30 + phase * 2.7) * 0.18;
+      float bend = (swell + flutter) * pow(clamp(position.y, 0.0, 1.0), 2.0);
+      transformed.x += bend * 0.42;
+      transformed.z += bend * 0.22;`)
+    .replace('#include <project_vertex>', `
+      vec4 mvPosition = vec4( transformed, 1.0 );
+      #ifdef USE_INSTANCING
+        mvPosition = instanceMatrix * mvPosition;
+      #endif
+      mvPosition.xyz += gWrap;
+      mvPosition = modelViewMatrix * mvPosition;
+      gl_Position = projectionMatrix * mvPosition;`);
+};
+
+const grass = new THREE.InstancedMesh(blade, grassMat, GRASS_BLADES);
+grass.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(GRASS_BLADES * 3), 3);
+{
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion();
+  const pos = new THREE.Vector3(), scl = new THREE.Vector3();
+  const dark = new THREE.Color('#39471f'), light = new THREE.Color('#8fa062');
+  const c = new THREE.Color();
+  for (let i = 0; i < GRASS_BLADES; i++) {
+    // uniform over the square: any density gradient would show up as a seam when wrapped
+    pos.set((Math.random() - 0.5) * GRASS_PATCH, 0, (Math.random() - 0.5) * GRASS_PATCH);
+    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI);
+    const h = 0.7 + Math.random() * 0.9;
+    scl.set(0.8 + Math.random() * 0.6, h, 1);
+    grass.setMatrixAt(i, m.compose(pos, q, scl));
+    grass.setColorAt(i, c.copy(dark).lerp(light, Math.random() ** 1.5));
+  }
+}
+grass.instanceMatrix.needsUpdate = true;
+grass.frustumCulled = false;
+scene.add(grass);
+
+// ---------------------------------------------------------------- the object
+const monolith = new THREE.Mesh(
+  new THREE.BoxGeometry(1.6, 7.2, 0.55),
+  new THREE.MeshStandardMaterial({ color: 0x14181a, roughness: 0.35, metalness: 0.1 })
+);
+monolith.position.set(0, 3.6, -12);
+scene.add(monolith);
+
+// a faint ring at its base so it reads as planted, not floating
+const ring = new THREE.Mesh(
+  new THREE.RingGeometry(2.0, 2.14, 64).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x9fb0a2, transparent: true, opacity: 0.35 })
+);
+ring.position.set(0, 0.02, -12);
+scene.add(ring);
+
+// ---------------------------------------------------------------- motes (depth cues)
+let moteFollow;
+{
+  const N = 400, p = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const r = Math.sqrt(Math.random()) * 40, a = Math.random() * Math.PI * 2;
+    p.set([Math.cos(a) * r, Math.random() * 9, Math.sin(a) * r], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  const motes = new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0xdfe8dc, size: 0.06, transparent: true, opacity: 0.5, depthWrite: false
+  }));
+  motes.frustumCulled = false;
+  scene.add(motes);
+  // recentre in whole-patch steps: the scatter is random, so the jump is invisible
+  moteFollow = (px, pz) => {
+    motes.position.x = Math.round((px - motes.position.x) / 80) * 80 + motes.position.x;
+    motes.position.z = Math.round((pz - motes.position.z) / 80) * 80 + motes.position.z;
+  };
+}
+
+// ---------------------------------------------------------------- controls
+// Desktop: click to capture the mouse, WASD to walk.
+// Cardboard / phone: look where you want to go, hold the button (or touch) to walk.
+const keys = new Set();
+let yaw = 0, pitch = 0, gazeWalk = false;
+
+addEventListener('keydown', e => keys.add(e.code));
+addEventListener('keyup',   e => keys.delete(e.code));
+
+renderer.domElement.addEventListener('click', () => {
+  if (!renderer.xr.isPresenting) renderer.domElement.requestPointerLock();
+});
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw   -= e.movementX * 0.0022;
+  pitch -= e.movementY * 0.0022;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+});
+
+// Touch outside VR: drag to look, tap-and-hold to walk.
+let touchPrev = null, touchMoved = false;
+renderer.domElement.addEventListener('touchstart', e => {
+  touchPrev = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  touchMoved = false;
+}, { passive: true });
+renderer.domElement.addEventListener('touchmove', e => {
+  if (!touchPrev) return;
+  const t = e.touches[0];
+  yaw   -= (t.clientX - touchPrev.x) * 0.005;
+  pitch -= (t.clientY - touchPrev.y) * 0.005;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+  touchPrev = { x: t.clientX, y: t.clientY };
+  touchMoved = true;
+}, { passive: true });
+renderer.domElement.addEventListener('touchend', () => {
+  if (!touchMoved) gazeWalk = !gazeWalk;   // tap toggles walking
+  touchPrev = null;
+}, { passive: true });
+
+// The Cardboard trigger arrives as an XR "select" event.
+const xrSession = () => renderer.xr.getSession();
+function wireSelect(session) {
+  session.addEventListener('selectstart', () => gazeWalk = true);
+  session.addEventListener('selectend',   () => gazeWalk = false);
+}
+
+// ---------------------------------------------------------------- Enter VR
+const btn = document.getElementById('vr');
+const hint = document.getElementById('hint');
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+    if (!ok) { btn.textContent = 'VR not available here'; return; }
+    btn.disabled = false;
+    btn.textContent = 'Enter VR';
+    btn.onclick = async () => {
+      if (renderer.xr.isPresenting) { xrSession().end(); return; }
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'viewer']
+      });
+      wireSelect(session);
+      session.addEventListener('end', () => {
+        btn.textContent = 'Enter VR';
+        hint.textContent = desktopHint;
+        gazeWalk = false;
+      });
+      await renderer.xr.setSession(session);
+      btn.textContent = 'Exit VR';
+      hint.textContent = '';
+    };
+  });
+} else {
+  btn.textContent = 'no WebXR in this browser';
+}
+
+const desktopHint = matchMedia('(pointer: coarse)').matches
+  ? 'drag to look · tap to walk · “Enter VR” for the headset'
+  : 'click to look · WASD to walk · “Enter VR” for the headset';
+hint.textContent = desktopHint;
+
+// ---------------------------------------------------------------- loop
+const clock = new THREE.Clock();
+const fwd = new THREE.Vector3(), right = new THREE.Vector3();
+const headQuat = new THREE.Quaternion();
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  grassUniforms.uTime.value += dt;
+
+  // Outside XR we drive the camera ourselves; inside XR the headset owns the rotation.
+  if (!renderer.xr.isPresenting) {
+    camera.rotation.set(pitch, yaw, 0, 'YXZ');
+    camera.position.y = EYE_HEIGHT;
+  }
+
+  // Walk direction always comes from where the head is actually pointing.
+  renderer.xr.isPresenting
+    ? renderer.xr.getCamera().getWorldQuaternion(headQuat)
+    : camera.getWorldQuaternion(headQuat);
+  fwd.set(0, 0, -1).applyQuaternion(headQuat); fwd.y = 0; fwd.normalize();
+  right.set(1, 0, 0).applyQuaternion(headQuat); right.y = 0; right.normalize();
+
+  let move = 0, strafe = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp'))    move += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown'))  move -= 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft'))  strafe -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) strafe += 1;
+  if (gazeWalk) move += 1;
+
+  if (move || strafe) {
+    player.position.addScaledVector(fwd, move * WALK_SPEED * dt);
+    player.position.addScaledVector(right, strafe * WALK_SPEED * dt);
+  }
+
+  grassUniforms.uPlayer.value.copy(player.position);
+  moteFollow(player.position.x, player.position.z);
+  sky.position.copy(player.position);
+  ground.position.set(player.position.x, 0, player.position.z);
+  monolith.rotation.y += dt * 0.06;
+
+  renderer.render(scene, camera);
+});
+</script>
+<script>
+  // Classic script, not a module: registration should still happen if the scene
+  // module above fails to parse on an older phone browser.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(e => console.warn('sw:', e));
+    });
+  }
+</script>
+</body>
+</html>

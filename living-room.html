@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0a09">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Living Room VR</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0a09; }
+  canvas { display: block; }
+  #ui { position: fixed; inset: auto 0 0 0; padding: 18px;
+        display: flex; justify-content: center; pointer-events: none;
+        font: 500 15px/1.4 system-ui, -apple-system, sans-serif; }
+  button { pointer-events: auto; font: inherit; padding: 14px 22px; border: 0;
+           border-radius: 999px; background: #f0e9df; color: #191512; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #hint { position: fixed; top: 0; left: 0; right: 0; padding: 16px; text-align: center;
+          color: #e3d9cc; pointer-events: none; text-shadow: 0 1px 4px #000;
+          font: 400 13px/1.5 system-ui, -apple-system, sans-serif; }
+</style>
+</head>
+<body>
+<div id="hint"></div>
+<div id="ui"><button id="vr" disabled>checking VR…</button></div>
+
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.min.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------------------------------------------------------------- room dimensions
+const ROOM_W = 5.0, ROOM_D = 4.0, ROOM_H = 2.6;   // metres
+const HX = ROOM_W / 2, HZ = ROOM_D / 2;
+const EYE_HEIGHT = 1.6;
+const WALK_SPEED = 1.7;      // slower than outdoors; it's a small space
+const PLAYER_R   = 0.28;
+
+const scene = new THREE.Scene();
+// No fog indoors: nothing is far enough away to need it, and large flat surfaces
+// interpolate fog depth per-vertex, which caused trouble in the grass scene.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 60);
+const player = new THREE.Group();
+player.add(camera);
+scene.add(player);
+player.position.set(0, 0, 0.4);
+camera.position.y = EYE_HEIGHT;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------------------------------------------------------------- helpers
+// Box with spherified corners — hard-edged primitives read as cheap up close in VR.
+function roundedBox(w, h, d, r, seg = 3) {
+  const g = new THREE.BoxGeometry(w, h, d, seg, seg, seg);
+  const p = g.attributes.position;
+  const v = new THREE.Vector3(), c = new THREE.Vector3(), dir = new THREE.Vector3();
+  const ix = Math.max(w / 2 - r, 0), iy = Math.max(h / 2 - r, 0), iz = Math.max(d / 2 - r, 0);
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    c.set(
+      THREE.MathUtils.clamp(v.x, -ix, ix),
+      THREE.MathUtils.clamp(v.y, -iy, iy),
+      THREE.MathUtils.clamp(v.z, -iz, iz)
+    );
+    dir.subVectors(v, c);
+    if (dir.lengthSq() > 1e-9) v.copy(c).addScaledVector(dir.normalize(), r);
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  p.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+
+const mat = (color, roughness = 0.85, metalness = 0.0) =>
+  new THREE.MeshStandardMaterial({ color, roughness, metalness });
+
+function add(parent, geo, material, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(geo, material);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  parent.add(m);
+  return m;
+}
+
+// ---------------------------------------------------------------- shell
+const MAT_FLOOR = mat(0x6b4f37, 0.72);
+const MAT_WALL  = mat(0xcabeac, 0.95);
+const MAT_CEIL  = mat(0xd8d2c8, 1.0);
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM_W, ROOM_D, 8, 8).rotateX(-Math.PI / 2), MAT_FLOOR);
+floor.receiveShadow = true;
+scene.add(floor);
+
+const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(ROOM_W, ROOM_D).rotateX(Math.PI / 2), MAT_CEIL);
+ceiling.position.y = ROOM_H;
+scene.add(ceiling);
+
+function wall(w, rotY, x, z) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, ROOM_H, 4, 4), MAT_WALL);
+  m.position.set(x, ROOM_H / 2, z);
+  m.rotation.y = rotY;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+wall(ROOM_W, 0,             0,  -HZ);   // TV wall
+wall(ROOM_W, Math.PI,       0,   HZ);   // behind the couch
+wall(ROOM_D, Math.PI / 2, -HX,    0);   // dresser wall
+wall(ROOM_D, -Math.PI / 2, HX,    0);   // window wall
+
+// skirting board, so the wall/floor join isn't a bare seam
+const skirt = mat(0xe6e0d6, 0.9);
+for (const [w, ry, x, z] of [[ROOM_W, 0, 0, -HZ + 0.01], [ROOM_W, 0, 0, HZ - 0.01],
+                             [ROOM_D, Math.PI / 2, -HX + 0.01, 0], [ROOM_D, Math.PI / 2, HX - 0.01, 0]]) {
+  const s = new THREE.Mesh(new THREE.BoxGeometry(w, 0.11, 0.025), skirt);
+  s.position.set(x, 0.055, z);
+  s.rotation.y = ry;
+  s.receiveShadow = true;
+  scene.add(s);
+}
+
+// ---------------------------------------------------------------- window (motivates the light)
+{
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.5, 1.15),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false })
+  );
+  glow.position.set(HX - 0.02, 1.45, -0.2);
+  glow.rotation.y = -Math.PI / 2;
+  scene.add(glow);
+
+  const frame = mat(0xf2ece2, 0.8);
+  const f = new THREE.Group();
+  f.position.set(HX - 0.04, 1.45, -0.2);
+  f.rotation.y = -Math.PI / 2;
+  add(f, new THREE.BoxGeometry(1.62, 0.06, 0.06), frame, 0,  0.60, 0);
+  add(f, new THREE.BoxGeometry(1.62, 0.06, 0.06), frame, 0, -0.60, 0);
+  add(f, new THREE.BoxGeometry(0.06, 1.21, 0.06), frame, -0.78, 0, 0);
+  add(f, new THREE.BoxGeometry(0.06, 1.21, 0.06), frame,  0.78, 0, 0);
+  add(f, new THREE.BoxGeometry(0.05, 1.21, 0.05), frame,  0, 0, 0);
+  scene.add(f);
+}
+
+// ---------------------------------------------------------------- lighting
+scene.add(new THREE.AmbientLight(0xccd5dd, 0.70));
+scene.add(new THREE.HemisphereLight(0xdfe6ee, 0x6a5744, 0.25));
+
+// daylight through the window
+const day = new THREE.DirectionalLight(0xdfeaf7, 2.3);
+day.position.set(5.5, 3.2, -0.6);
+day.target.position.set(-1.2, 0.6, 0.4);
+day.castShadow = true;
+day.shadow.mapSize.set(1024, 1024);
+day.shadow.camera.left = -4; day.shadow.camera.right = 4;
+day.shadow.camera.top = 4;   day.shadow.camera.bottom = -4;
+day.shadow.camera.near = 0.5; day.shadow.camera.far = 14;
+day.shadow.bias = -0.0012;
+day.shadow.normalBias = 0.02;
+day.shadow.radius = 4;
+scene.add(day, day.target);
+
+// warm bounce so the shadow side isn't dead
+const bounce = new THREE.PointLight(0xffd9ad, 2.6, 8, 2);
+bounce.position.set(-1.1, 1.8, 1.1);
+scene.add(bounce);
+
+// the TV throws its own light into the room
+const tvLight = new THREE.PointLight(0x88aaff, 1.6, 5, 2);
+tvLight.position.set(0, 1.15, -1.35);
+scene.add(tvLight);
+
+// ---------------------------------------------------------------- couch
+const couch = new THREE.Group();
+couch.position.set(-0.15, 0, 1.35);
+couch.rotation.y = Math.PI;   // face the TV
+scene.add(couch);
+{
+  const fabric  = mat(0x9d8f78, 0.95);
+  const cushion = mat(0xb0a289, 0.95);
+  const foot    = mat(0x3b2c1e, 0.6);
+
+  add(couch, roundedBox(2.10, 0.34, 0.92, 0.06), fabric, 0, 0.30, 0);       // base
+  add(couch, roundedBox(2.10, 0.62, 0.20, 0.07), fabric, 0, 0.75, -0.36);   // backrest
+  add(couch, roundedBox(0.22, 0.52, 0.92, 0.08), fabric, -0.94, 0.58, 0);   // arms
+  add(couch, roundedBox(0.22, 0.52, 0.92, 0.08), fabric,  0.94, 0.58, 0);
+
+  for (const x of [-0.42, 0.42]) {
+    add(couch, roundedBox(0.80, 0.16, 0.82, 0.07), cushion, x, 0.55, 0.02); // seat
+    add(couch, roundedBox(0.76, 0.46, 0.14, 0.06), cushion, x, 0.78, -0.28); // back
+  }
+  for (const [x, z] of [[-0.92, 0.38], [0.92, 0.38], [-0.92, -0.38], [0.92, -0.38]]) {
+    add(couch, new THREE.CylinderGeometry(0.035, 0.028, 0.13, 8), foot, x, 0.065, z);
+  }
+}
+
+// ---------------------------------------------------------------- TV stand + TV
+const stand = new THREE.Group();
+stand.position.set(0, 0, -1.72);
+scene.add(stand);
+{
+  const wood = mat(0x4a3423, 0.65);
+  add(stand, roundedBox(1.85, 0.06, 0.44, 0.02), wood, 0, 0.52, 0);   // top
+  add(stand, roundedBox(1.75, 0.05, 0.40, 0.02), wood, 0, 0.26, 0);   // shelf
+  add(stand, roundedBox(0.06, 0.52, 0.42, 0.02), wood, -0.90, 0.26, 0);
+  add(stand, roundedBox(0.06, 0.52, 0.42, 0.02), wood,  0.90, 0.26, 0);
+}
+
+// screen: a slow drifting colour field, so the room has something alive in it
+const screenUniforms = { uTime: { value: 0 } };
+const screenMat = new THREE.ShaderMaterial({
+  uniforms: screenUniforms,
+  vertexShader: `varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `varying vec2 vUv; uniform float uTime;
+    void main(){
+      float t = uTime * 0.25;
+      // three offset bands drifting at different rates
+      float a = sin(vUv.y * 6.0 + t * 1.7) * 0.5 + 0.5;
+      float b = sin(vUv.x * 4.0 - t * 1.1 + vUv.y * 2.0) * 0.5 + 0.5;
+      float c = sin((vUv.x + vUv.y) * 3.0 + t * 2.3) * 0.5 + 0.5;
+      vec3 col = mix(vec3(0.05,0.12,0.32), vec3(0.35,0.62,0.95), a);
+      col = mix(col, vec3(0.85,0.45,0.55), b * 0.35);
+      col += c * 0.10;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+
+const tv = new THREE.Group();
+tv.position.set(0, 1.16, -1.80);
+scene.add(tv);
+{
+  const shell = mat(0x141414, 0.45, 0.2);
+  add(tv, roundedBox(1.22, 0.72, 0.05, 0.012), shell, 0, 0, 0);
+  const screen = new THREE.Mesh(new THREE.PlaneGeometry(1.14, 0.64), screenMat);
+  screen.position.z = 0.028;
+  tv.add(screen);
+  add(tv, roundedBox(0.34, 0.04, 0.20, 0.015), shell, 0, -0.38, 0.02);  // neck + foot
+  add(tv, roundedBox(0.50, 0.03, 0.28, 0.012), shell, 0, -0.045 - 0.36, 0.02);
+}
+
+// ---------------------------------------------------------------- dresser
+const dresser = new THREE.Group();
+dresser.position.set(-2.22, 0, 0.15);
+dresser.rotation.y = Math.PI / 2;      // front faces into the room
+scene.add(dresser);
+{
+  const body  = mat(0x8a6a48, 0.7);
+  const front = mat(0x9a7a56, 0.65);
+  const knob  = mat(0x2a2622, 0.4, 0.6);
+
+  add(dresser, roundedBox(1.50, 0.92, 0.50, 0.02), body, 0, 0.52, 0);
+  add(dresser, roundedBox(1.56, 0.04, 0.54, 0.015), body, 0, 1.00, 0);   // lip
+  for (let i = 0; i < 3; i++) {
+    const y = 0.28 + i * 0.28;
+    add(dresser, roundedBox(1.38, 0.24, 0.03, 0.012), front, 0, y, 0.255);
+    add(dresser, new THREE.SphereGeometry(0.028, 10, 8), knob, -0.32, y, 0.285);
+    add(dresser, new THREE.SphereGeometry(0.028, 10, 8), knob,  0.32, y, 0.285);
+  }
+  for (const x of [-0.66, 0.66]) for (const z of [-0.19, 0.19]) {
+    add(dresser, new THREE.BoxGeometry(0.07, 0.12, 0.07), mat(0x4a3423, 0.6), x, 0.06, z);
+  }
+}
+
+// a couple of objects on top, for scale cues
+add(dresser, new THREE.CylinderGeometry(0.09, 0.07, 0.26, 16), mat(0x9fb0a8, 0.5), -0.42, 1.15, 0);
+add(dresser, roundedBox(0.20, 0.03, 0.26, 0.008), mat(0x7a3b34, 0.7), 0.38, 1.03, 0);
+add(dresser, roundedBox(0.19, 0.03, 0.25, 0.008), mat(0x2f4a5c, 0.7), 0.38, 1.06, 0.01);
+
+// ---------------------------------------------------------------- rug
+{
+  const rug = new THREE.Mesh(roundedBox(2.6, 0.02, 1.5, 0.05), mat(0x8f8aa3, 1.0));
+  rug.position.set(-0.1, 0.011, 0.0);
+  rug.receiveShadow = true;
+  scene.add(rug);
+}
+
+// ---------------------------------------------------------------- collision
+// Axis-aligned footprints; the player is pushed out along the shallower overlap.
+const blockers = [
+  { x: -0.15, z: 1.35, hw: 1.16, hd: 0.52 },   // couch
+  { x:  0,    z: -1.72, hw: 0.95, hd: 0.24 },  // tv stand
+  { x: -2.22, z: 0.15, hw: 0.28, hd: 0.80 }    // dresser
+];
+
+function resolve(pos) {
+  pos.x = THREE.MathUtils.clamp(pos.x, -HX + PLAYER_R, HX - PLAYER_R);
+  pos.z = THREE.MathUtils.clamp(pos.z, -HZ + PLAYER_R, HZ - PLAYER_R);
+  for (const b of blockers) {
+    const dx = pos.x - b.x, dz = pos.z - b.z;
+    const ox = b.hw + PLAYER_R - Math.abs(dx);
+    const oz = b.hd + PLAYER_R - Math.abs(dz);
+    if (ox > 0 && oz > 0) {
+      if (ox < oz) pos.x = b.x + Math.sign(dx || 1) * (b.hw + PLAYER_R);
+      else         pos.z = b.z + Math.sign(dz || 1) * (b.hd + PLAYER_R);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- controls
+const keys = new Set();
+let yaw = 0, pitch = 0, gazeWalk = false;
+
+addEventListener('keydown', e => keys.add(e.code));
+addEventListener('keyup',   e => keys.delete(e.code));
+
+renderer.domElement.addEventListener('click', () => {
+  if (!renderer.xr.isPresenting) renderer.domElement.requestPointerLock();
+});
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw   -= e.movementX * 0.0022;
+  pitch -= e.movementY * 0.0022;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+});
+
+let touchPrev = null, touchMoved = false;
+renderer.domElement.addEventListener('touchstart', e => {
+  touchPrev = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  touchMoved = false;
+}, { passive: true });
+renderer.domElement.addEventListener('touchmove', e => {
+  if (!touchPrev) return;
+  const t = e.touches[0];
+  yaw   -= (t.clientX - touchPrev.x) * 0.005;
+  pitch -= (t.clientY - touchPrev.y) * 0.005;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+  touchPrev = { x: t.clientX, y: t.clientY };
+  touchMoved = true;
+}, { passive: true });
+renderer.domElement.addEventListener('touchend', () => {
+  if (!touchMoved) gazeWalk = !gazeWalk;
+  touchPrev = null;
+}, { passive: true });
+
+// ---------------------------------------------------------------- Enter VR
+const btn = document.getElementById('vr');
+const hint = document.getElementById('hint');
+const desktopHint = matchMedia('(pointer: coarse)').matches
+  ? 'drag to look · tap to walk · “Enter VR” for the headset'
+  : 'click to look · WASD to walk · “Enter VR” for the headset';
+hint.textContent = desktopHint;
+
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+    if (!ok) { btn.textContent = 'VR not available here'; return; }
+    btn.disabled = false;
+    btn.textContent = 'Enter VR';
+    btn.onclick = async () => {
+      if (renderer.xr.isPresenting) { renderer.xr.getSession().end(); return; }
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'viewer']
+      });
+      session.addEventListener('selectstart', () => gazeWalk = true);
+      session.addEventListener('selectend',   () => gazeWalk = false);
+      session.addEventListener('end', () => {
+        btn.textContent = 'Enter VR';
+        hint.textContent = desktopHint;
+        gazeWalk = false;
+      });
+      await renderer.xr.setSession(session);
+      btn.textContent = 'Exit VR';
+      hint.textContent = '';
+    };
+  });
+} else {
+  btn.textContent = 'no WebXR in this browser';
+}
+
+// ---------------------------------------------------------------- loop
+const clock = new THREE.Clock();
+const fwd = new THREE.Vector3(), right = new THREE.Vector3();
+const headQuat = new THREE.Quaternion();
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  screenUniforms.uTime.value += dt;
+
+  // the TV light tracks the screen's overall drift
+  const t = screenUniforms.uTime.value * 0.25;
+  tvLight.color.setRGB(
+    0.35 + 0.2 * Math.sin(t * 1.1),
+    0.5  + 0.15 * Math.sin(t * 1.7 + 1.0),
+    0.95
+  );
+
+  if (!renderer.xr.isPresenting) {
+    camera.rotation.set(pitch, yaw, 0, 'YXZ');
+    camera.position.y = EYE_HEIGHT;
+  }
+
+  renderer.xr.isPresenting
+    ? renderer.xr.getCamera().getWorldQuaternion(headQuat)
+    : camera.getWorldQuaternion(headQuat);
+  fwd.set(0, 0, -1).applyQuaternion(headQuat);   fwd.y = 0;   fwd.normalize();
+  right.set(1, 0, 0).applyQuaternion(headQuat);  right.y = 0; right.normalize();
+
+  let move = 0, strafe = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp'))    move += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown'))  move -= 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft'))  strafe -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) strafe += 1;
+  if (gazeWalk) move += 1;
+
+  if (move || strafe) {
+    player.position.addScaledVector(fwd, move * WALK_SPEED * dt);
+    player.position.addScaledVector(right, strafe * WALK_SPEED * dt);
+    resolve(player.position);
+  }
+
+  renderer.render(scene, camera);
+});
+</script>
+<script>
+  // Classic script, not a module: registration should still happen if the scene
+  // module above fails to parse on an older phone browser.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(e => console.warn('sw:', e));
+    });
+  }
+</script>
+</body>
+</html>
