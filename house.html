@@ -66,6 +66,11 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
+// The sun is fixed and the house is static, so the shadow map is not worth
+// rebuilding 90 objects deep on every frame. Render it once; the animation loop
+// re-flags it only while the front door is mid-swing.
+renderer.shadowMap.autoUpdate = false;
+renderer.shadowMap.needsUpdate = true;
 document.body.appendChild(renderer.domElement);
 
 const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.12, 160);
@@ -668,6 +673,17 @@ roomLight(0xffeede, 2.2, 8, 2.6, 2.25, 1.2);       // hall
 roomLight(0xffe8d0, 2.4, 8, -2.6, F1 + 2.1, -1.0); // bedroom
 roomLight(0xffeede, 2.0, 7, 2.6, F1 + 2.1, -0.5);  // landing
 
+// ================================================================ perf readout
+// Opt in with ?stats — worth measuring before trading away any of the lighting.
+const statsEl = new URLSearchParams(location.search).has('stats')
+  ? document.body.appendChild(Object.assign(document.createElement('div'), {
+      style: 'position:fixed;top:8px;left:8px;z-index:9;padding:6px 9px;background:#000a;' +
+             'color:#8f8;font:12px/1.45 ui-monospace,monospace;white-space:pre;' +
+             'border-radius:6px;pointer-events:none'
+    }))
+  : null;
+let statsAcc = 0, statsFrames = 0;
+
 // ================================================================ room labels
 const ROOMS = [
   { name: 'Front garden', test: p => p.z > MAXZ },
@@ -785,7 +801,9 @@ renderer.setAnimationLoop(() => {
   const dp = player.position;
   const nearDoor = dp.y < 1.0 && Math.hypot(dp.x - 2.5, dp.z - MAXZ) < 2.2;
   const wanted = nearDoor ? Math.PI * 0.62 : 0;   // swings inward, away from you
+  const doorWas = doorPivot.rotation.y;
   doorPivot.rotation.y += (wanted - doorPivot.rotation.y) * Math.min(1, dt * 3.5);
+  if (Math.abs(doorPivot.rotation.y - doorWas) > 1e-4) renderer.shadowMap.needsUpdate = true;
 
   if (!renderer.xr.isPresenting) {
     camera.rotation.set(pitch, yaw, 0, 'YXZ');
@@ -820,6 +838,18 @@ renderer.setAnimationLoop(() => {
   else if (roomTimer <= 0) roomEl.style.opacity = 0;
 
   renderer.render(scene, camera);
+
+  if (statsEl) {
+    statsAcc += dt; statsFrames++;
+    if (statsAcc >= 0.5) {
+      const info = renderer.info;
+      statsEl.textContent = `${(statsFrames / statsAcc).toFixed(0)} fps
+${info.render.calls} draw calls
+${(info.render.triangles / 1000).toFixed(1)}k tris
+${info.programs.length} shaders`;
+      statsAcc = 0; statsFrames = 0;
+    }
+  }
 });
 </script>
 <script>

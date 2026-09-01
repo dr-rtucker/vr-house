@@ -3,7 +3,7 @@
 // Cache-first on purpose: once the house is on the phone it should load with no
 // network at all — on a plane, in a basement, on someone else's wifi. The cost is
 // that updates only land when CACHE bumps, so bump the version on every deploy.
-const CACHE = 'vr-house-v1';
+const CACHE = 'vr-house-v2';
 
 const PRECACHE = [
   './',
