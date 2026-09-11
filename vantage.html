@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="./vantage.webmanifest">
+<link rel="icon" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>House Vantage</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #e8e0d4;
+               font: 400 15px/1.5 system-ui, -apple-system, sans-serif;
+               -webkit-text-size-adjust: 100%; touch-action: none; }
+  canvas { display: block; }
+  .panel { position: fixed; inset: 0; z-index: 5; overflow-y: auto; background: #0b0a09;
+           padding: max(24px, env(safe-area-inset-top)) 24px 32px; }
+  .panel[hidden] { display: none !important; }
+  .wrap { max-width: 460px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p, li { color: #a49b8d; font-size: 13.5px; }
+  button { font: 500 15px/1.4 system-ui, sans-serif; padding: 14px 22px; border: 0; border-radius: 999px;
+           background: #f0e9df; color: #191512; cursor: pointer; margin-top: 18px; width: 100%; }
+  button.sec { background: #2a251e; color: #e8e0d4; margin-top: 10px; }
+  .err { color: #e2a08a; font-size: 13px; margin-top: 12px; min-height: 1.2em; }
+  #rotate { position: fixed; inset: 0; z-index: 9; background: #000; display: none;
+            align-items: center; justify-content: center; text-align: center; padding: 30px; }
+  #rotate.on { display: flex; }
+  /* Only shown in the flat view: in stereo a DOM element spans both eyes and reads
+     as double vision, so there the way out is the back gesture instead. */
+  #exit { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 10px; z-index: 6;
+          width: auto; margin: 0; padding: 8px 14px; font-size: 13px; background: #000a; color: #e8e0d4; }
+  #hint { position: fixed; left: 0; right: 0; bottom: max(14px, env(safe-area-inset-bottom)); z-index: 6;
+          text-align: center; color: #e8e0d4; pointer-events: none; text-shadow: 0 1px 4px #000;
+          font-size: 13px; transition: opacity 1s; }
+</style>
+</head>
+<body>
+
+<div class="panel" id="menu"><div class="wrap">
+  <h1>Stand in the house</h1>
+  <p>You are placed at one spot in the living room. You can't walk — turn your head
+     (or the phone) to look around.</p>
+
+  <button id="goStereo">Cardboard viewer</button>
+  <button class="sec" id="goMono">Just the screen</button>
+  <div class="err" id="err"></div>
+
+  <ul>
+    <li>In the viewer, press its button to re-centre the view on whatever is in front of you.</li>
+    <li>Without a viewer, move the phone around — or drag, on a laptop.</li>
+    <li>On iPhone, launch this from the home-screen icon, not from Safari.</li>
+  </ul>
+</div></div>
+
+<button id="exit" hidden>Exit</button>
+<div id="hint"></div>
+<div id="rotate">Turn the phone sideways<br>(landscape) to continue.</div>
+
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.min.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { buildHouse } from './scene-house.js';
+
+// The one place you stand. Feet position; the eye sits EYE above it. Just inside
+// the hall doorway, looking west down the living room: sofa on the left, TV and
+// kitchen doorway on the right, window ahead, the hall and stairs behind you.
+const VANTAGE = { x: 0.1, y: 0.0, z: 1.9, yaw: Math.PI / 2 };
+const EYE_SEP = 0.064;
+
+// Dev: ?start=mono|stereo skips the menu; ?at=x,y,z and ?yaw= move the vantage;
+// ?look=yaw,pitch (radians, relative) turns the head for screenshot checks.
+const Q = new URLSearchParams(location.search);
+if (Q.has('at'))  { const [x, y, z] = Q.get('at').split(',').map(Number); Object.assign(VANTAGE, { x, y, z }); }
+if (Q.has('yaw')) VANTAGE.yaw = parseFloat(Q.get('yaw'));
+
+// ============================================================ scene
+const { scene, doorPivot, screenUniforms, tvLight, EYE } = buildHouse();
+doorPivot.rotation.y = 0;   // it only opens on approach in house.html; you can't approach here
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.shadowMap.autoUpdate = false;   // static scene, static sun
+renderer.shadowMap.needsUpdate = true;
+renderer.domElement.style.display = 'none';
+document.body.appendChild(renderer.domElement);
+
+// rig = the fixed standing spot plus a yaw offset; camera = the head, which only rotates.
+const rig = new THREE.Group();
+const camera = new THREE.PerspectiveCamera(72, 1, 0.12, 160);
+rig.position.set(VANTAGE.x, VANTAGE.y, VANTAGE.z);
+rig.add(camera);
+camera.position.y = EYE;
+scene.add(rig);
+
+const stereo = new THREE.StereoCamera();
+stereo.eyeSep = EYE_SEP;
+let stereoMode = false, running = false;
+
+const size = new THREE.Vector2();
+function render() {
+  renderer.getSize(size);
+  if (!stereoMode) {
+    if (camera.aspect !== size.x / size.y) { camera.aspect = size.x / size.y; camera.updateProjectionMatrix(); }
+    renderer.setViewport(0, 0, size.x, size.y);
+    renderer.render(scene, camera);
+    return;
+  }
+  const w = size.x / 2, h = size.y;
+  if (camera.aspect !== w / h) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  scene.updateMatrixWorld(true);        // stereo.update reads camera.matrixWorld
+  stereo.update(camera);
+  renderer.setScissorTest(true);
+  renderer.setViewport(0, 0, w, h); renderer.setScissor(0, 0, w, h);
+  renderer.render(scene, stereo.cameraL);
+  renderer.setViewport(w, 0, w, h); renderer.setScissor(w, 0, w, h);
+  renderer.render(scene, stereo.cameraR);
+  renderer.setScissorTest(false);
+}
+
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); checkOrientation(); });
+
+// ============================================================ head tracking
+// Same deviceorientation -> camera mapping as study.html. Not WebXR: Chrome for
+// Android no longer offers immersive-vr on a phone, so Cardboard has to be done by hand.
+const devQ = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _zee = new THREE.Vector3(0, 0, 1);
+const _q0 = new THREE.Quaternion();
+const _q1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);  // -90 deg about X
+let devAlpha = 0, devBeta = 0, devGamma = 0, haveGyro = false, needsCentre = true;
+
+function screenAngle() {
+  const a = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle
+    : (typeof window.orientation === 'number' ? window.orientation : 0);
+  return a * Math.PI / 180;
+}
+
+function onOrientation(e) {
+  if (e.alpha === null || e.alpha === undefined) return;
+  devAlpha = e.alpha * Math.PI / 180;
+  devBeta  = (e.beta  || 0) * Math.PI / 180;
+  devGamma = (e.gamma || 0) * Math.PI / 180;
+  haveGyro = true;
+}
+
+// Drag to look. With a gyro it only nudges yaw (the phone owns pitch, so dragging
+// it would fight gravity); without one it drives both.
+let dragYaw = 0, dragPitch = 0;
+if (Q.has('look')) { const [y, p] = Q.get('look').split(',').map(Number); dragYaw = y || 0; dragPitch = p || 0; }
+
+function updateHead() {
+  if (haveGyro) {
+    _e.set(devBeta, devAlpha, -devGamma, 'YXZ');
+    devQ.setFromEuler(_e);
+    devQ.multiply(_q1);
+    devQ.multiply(_q0.setFromAxisAngle(_zee, -screenAngle()));
+    if (needsCentre) { recenter(); needsCentre = false; }
+  } else {
+    _e.set(dragPitch, 0, 0, 'YXZ');
+    devQ.setFromEuler(_e);
+  }
+  camera.quaternion.copy(devQ);
+  rig.rotation.y = centreYaw + dragYaw;
+}
+
+// Whatever direction you are physically facing becomes the vantage's intended view.
+// Yaw only: offsetting pitch or roll tilts the horizon away from gravity.
+let centreYaw = VANTAGE.yaw;
+function recenter() {
+  _e.setFromQuaternion(devQ, 'YXZ');
+  centreYaw = VANTAGE.yaw - (haveGyro ? _e.y : 0);
+  dragYaw = 0;
+}
+
+// A tap re-centres (in the viewer that is its one button); a drag looks around.
+let down = null, moved = false;
+addEventListener('pointerdown', e => { if (running) { down = { x: e.clientX, y: e.clientY }; moved = false; } });
+addEventListener('pointermove', e => {
+  if (!down) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y;
+  if (!moved && Math.hypot(dx, dy) < 8) return;
+  moved = true;
+  dragYaw += dx * 0.004;
+  if (!haveGyro) dragPitch = Math.max(-1.4, Math.min(1.4, dragPitch + dy * 0.004));
+  down = { x: e.clientX, y: e.clientY };
+});
+addEventListener('pointerup', () => { if (down && !moved && haveGyro) recenter(); down = null; });
+addEventListener('pointercancel', () => down = null);
+
+// ============================================================ loop
+let prevT = 0;
+function tick(now) {
+  requestAnimationFrame(tick);
+  if (!running) return;
+  const dt = prevT ? Math.min((now - prevT) / 1000, 0.05) : 0;
+  prevT = now;
+
+  updateHead();
+  screenUniforms.uTime.value += dt;
+  const t = screenUniforms.uTime.value * 0.25;
+  tvLight.color.setRGB(0.35 + 0.2 * Math.sin(t * 1.1), 0.5 + 0.15 * Math.sin(t * 1.7 + 1.0), 0.95);
+  render();
+}
+requestAnimationFrame(tick);
+
+// ============================================================ device plumbing
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); }
+  catch (e) { wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible' && wakeLock === null) keepAwake();
+});
+
+const $ = id => document.getElementById(id);
+const menuEl = $('menu'), errEl = $('err'), exitEl = $('exit'), hintEl = $('hint'), rotateEl = $('rotate');
+
+function checkOrientation() {
+  rotateEl.classList.toggle('on', running && stereoMode && innerHeight > innerWidth);
+}
+
+async function start(asStereo) {
+  errEl.textContent = '';
+  // iOS only grants motion access from inside a user gesture, so this goes first.
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    let res = 'denied';
+    try { res = await DeviceOrientationEvent.requestPermission(); } catch (e) {}
+    if (res !== 'granted' && asStereo) {
+      errEl.textContent = 'Motion access was refused. On iPhone: Settings > Safari > Motion & Orientation Access, then reload.';
+      return;
+    }
+  }
+  addEventListener('deviceorientation', onOrientation, true);
+
+  stereoMode = asStereo;
+  if (asStereo) {
+    try { await document.documentElement.requestFullscreen(); } catch (e) {}
+    try { await screen.orientation.lock('landscape'); } catch (e) {}
+  }
+  keepAwake();
+
+  needsCentre = true;
+  centreYaw = VANTAGE.yaw;
+  menuEl.hidden = true;
+  exitEl.hidden = asStereo;
+  renderer.domElement.style.display = 'block';
+  renderer.setSize(innerWidth, innerHeight);
+  running = true; prevT = 0;
+  checkOrientation();
+
+  if (!asStereo) {
+    hintEl.textContent = matchMedia('(pointer: coarse)').matches
+      ? 'move the phone to look around · tap to re-centre'
+      : 'drag to look around';
+    hintEl.style.opacity = 1;
+    setTimeout(() => hintEl.style.opacity = 0, 4000);
+  }
+}
+
+function stop() {
+  running = false;
+  renderer.domElement.style.display = 'none';
+  exitEl.hidden = true; hintEl.style.opacity = 0;
+  menuEl.hidden = false;
+  checkOrientation();
+  try { wakeLock && wakeLock.release(); } catch (e) {}
+  wakeLock = null;
+  try { screen.orientation && screen.orientation.unlock && screen.orientation.unlock(); } catch (e) {}
+  try { document.fullscreenElement && document.exitFullscreen(); } catch (e) {}
+}
+
+// Android's back gesture leaves fullscreen; take that as "done" rather than
+// leaving a half-width stereo view on a normal browser tab.
+document.addEventListener('fullscreenchange', () => {
+  if (running && stereoMode && !document.fullscreenElement) stop();
+});
+
+$('goStereo').onclick = () => start(true);
+$('goMono').onclick = () => start(false);
+exitEl.onclick = stop;
+
+if (Q.get('start') === 'mono' || Q.get('start') === 'stereo') start(Q.get('start') === 'stereo');
+</script>
+
+<script>
+  // Classic script: registration should still happen if the module above fails
+  // to parse on an older phone browser.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(e => console.warn('sw:', e));
+    });
+  }
+</script>
+</body>
+</html>

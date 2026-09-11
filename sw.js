@@ -3,16 +3,21 @@
 // Cache-first on purpose: once the house is on the phone it should load with no
 // network at all — on a plane, in a basement, on someone else's wifi. The cost is
 // that updates only land when CACHE bumps, so bump the version on every deploy.
-const CACHE = 'vr-house-v2';
+const CACHE = 'vr-house-v3';
 
 const PRECACHE = [
   './',
   './index.html',
   './house.html',
+  './study.html',
+  './vantage.html',
+  './scene-house.js',
   './living-room.html',
   './lib/three.module.min.js',
   './lib/three.core.min.js',   // three.module.min.js imports this at runtime
   './manifest.webmanifest',
+  './study.webmanifest',
+  './vantage.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/maskable-512.png',
