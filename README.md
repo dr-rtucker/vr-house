@@ -11,6 +11,7 @@ static files.
 | `index.html`       | grass field + monolith    |
 | `study.html`       | fixed-viewpoint psych study (Cardboard) |
 | `vantage.html`     | one standing spot in the house, look around only (Cardboard or flat) |
+| `office.html`      | a real office rebuilt from a phone video; stand in the middle and look around |
 
 `scene-house.js` holds the house geometry, materials and lighting. `house.html`,
 `study.html` and `vantage.html` all import it, so the walkthrough and the study render the
@@ -62,6 +63,23 @@ approach as the study, minus trials and data.
 * The spot is `VANTAGE` at the top of the script. Dev flags: `?at=x,y,z`, `?yaw=`,
   `?start=mono|stereo` (skip the menu), `?look=yaw,pitch` (turn the head, for
   screenshots).
+
+## The office (`office.html`)
+
+A real room from a ~20 s phone video of walking round it. The room is a box
+fitted to the walls and floor, each face textured from the video frames; you stand
+at the middle of the box, at the height the video was shot from. Same viewer
+controls and dev flags as the vantage demo (`?at=x,y,z`, `?yaw=`, `?start=`, `?look=`).
+
+The room lives in `rooms/office/` — `room.json` (box size, the vantage, and each
+face's position) plus one JPEG per face. It is built outside this repo by
+`../scripts/05_room_sfm.py` (COLMAP structure-from-motion: where the phone was for
+each frame) then `../scripts/06_room_box.py` (level, scale, fit the box, texture it).
+The source video is not committed (`*.mp4` is gitignored).
+
+What a box can't do: furniture is painted onto the walls and floor rather than
+standing in the room, so it looks right from the vantage and only there — which is
+why you can't walk. Nobody filmed the ceiling, so it is a flat tone.
 
 ## The study (`study.html`)
 

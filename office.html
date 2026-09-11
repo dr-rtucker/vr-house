@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="./office.webmanifest">
+<link rel="icon" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Office Vantage</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #e8e0d4;
+               font: 400 15px/1.5 system-ui, -apple-system, sans-serif;
+               -webkit-text-size-adjust: 100%; touch-action: none; }
+  canvas { display: block; }
+  .panel { position: fixed; inset: 0; z-index: 5; overflow-y: auto; background: #0b0a09;
+           padding: max(24px, env(safe-area-inset-top)) 24px 32px; }
+  .panel[hidden] { display: none !important; }
+  .wrap { max-width: 460px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p, li { color: #a49b8d; font-size: 13.5px; }
+  button { font: 500 15px/1.4 system-ui, sans-serif; padding: 14px 22px; border: 0; border-radius: 999px;
+           background: #f0e9df; color: #191512; cursor: pointer; margin-top: 18px; width: 100%; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.sec { background: #2a251e; color: #e8e0d4; margin-top: 10px; }
+  .err { color: #e2a08a; font-size: 13px; margin-top: 12px; min-height: 1.2em; }
+  #rotate { position: fixed; inset: 0; z-index: 9; background: #000; display: none;
+            align-items: center; justify-content: center; text-align: center; padding: 30px; }
+  #rotate.on { display: flex; }
+  /* Only shown in the flat view: in stereo a DOM element spans both eyes and reads
+     as double vision, so there the way out is the back gesture instead. */
+  #exit { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 10px; z-index: 6;
+          width: auto; margin: 0; padding: 8px 14px; font-size: 13px; background: #000a; color: #e8e0d4; }
+  #hint { position: fixed; left: 0; right: 0; bottom: max(14px, env(safe-area-inset-bottom)); z-index: 6;
+          text-align: center; color: #e8e0d4; pointer-events: none; text-shadow: 0 1px 4px #000;
+          font-size: 13px; transition: opacity 1s; }
+</style>
+</head>
+<body>
+
+<div class="panel" id="menu"><div class="wrap">
+  <h1>Stand in the office</h1>
+  <p>A real room, rebuilt from a phone video. You stand in the middle of it and
+     can't walk — turn your head (or the phone) to look around.</p>
+
+  <button id="goStereo" disabled>Loading…</button>
+  <button class="sec" id="goMono" disabled>Just the screen</button>
+  <div class="err" id="err"></div>
+
+  <ul>
+    <li>In the viewer, press its button to re-centre the view on whatever is in front of you.</li>
+    <li>Without a viewer, move the phone around — or drag, on a laptop.</li>
+    <li>On iPhone, launch this from the home-screen icon, not from Safari.</li>
+  </ul>
+</div></div>
+
+<button id="exit" hidden>Exit</button>
+<div id="hint"></div>
+<div id="rotate">Turn the phone sideways<br>(landscape) to continue.</div>
+
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.min.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// Built by scripts/06_room_box.py from the phone video: the room is a box fitted
+// to the reconstructed walls and floor, each face textured by projecting the
+// video frames onto it. room.json says where each face is and where to stand.
+const ROOM_DIR = './rooms/office/';
+const EYE_SEP = 0.064;
+
+// Dev: ?start=mono|stereo skips the menu; ?at=x,y,z moves the eye; ?yaw= the
+// starting heading; ?look=yaw,pitch (radians, relative) turns the head for screenshots.
+const Q = new URLSearchParams(location.search);
+
+// ============================================================ scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;   // the textures are photographs; light is baked in
+renderer.domElement.style.display = 'none';
+document.body.appendChild(renderer.domElement);
+
+// A quad from room.json: corners at centre ± u·w/2 ± v·h/2; image top edge on the +v side.
+function faceMesh(face, texture) {
+  const c = new THREE.Vector3(...face.center);
+  const u = new THREE.Vector3(...face.u).multiplyScalar(face.w / 2);
+  const v = new THREE.Vector3(...face.v).multiplyScalar(face.h / 2);
+  const corners = [
+    c.clone().sub(u).sub(v), c.clone().add(u).sub(v),
+    c.clone().add(u).add(v), c.clone().sub(u).add(v),
+  ];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(corners.flatMap(p => p.toArray()), 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  // DoubleSide: we are always inside the box, and this saves caring about winding.
+  return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide }));
+}
+
+let room = null;
+async function loadRoom() {
+  room = await (await fetch(ROOM_DIR + 'room.json')).json();
+  const loader = new THREE.TextureLoader();
+  const maxAniso = renderer.capabilities.getMaxAnisotropy();
+  await Promise.all(room.faces.map(face => new Promise((resolve, reject) => {
+    loader.load(ROOM_DIR + face.image, tex => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = maxAniso;             // the floor is seen at grazing angles
+      scene.add(faceMesh(face, tex));
+      resolve();
+    }, undefined, reject);
+  })));
+}
+
+// rig = the fixed standing spot plus a yaw offset; camera = the head, which only rotates.
+const rig = new THREE.Group();
+const camera = new THREE.PerspectiveCamera(72, 1, 0.05, 50);
+rig.add(camera);
+scene.add(rig);
+let vantageYaw = 0;
+
+function placeRig() {
+  const at = Q.has('at') ? Q.get('at').split(',').map(Number) : room.vantage.eye;
+  rig.position.set(at[0], 0, at[2]);
+  camera.position.y = at[1];
+  vantageYaw = Q.has('yaw') ? parseFloat(Q.get('yaw')) : room.vantage.yaw;
+}
+
+const stereo = new THREE.StereoCamera();
+stereo.eyeSep = EYE_SEP;
+let stereoMode = false, running = false;
+
+const size = new THREE.Vector2();
+function render() {
+  renderer.getSize(size);
+  if (!stereoMode) {
+    if (camera.aspect !== size.x / size.y) { camera.aspect = size.x / size.y; camera.updateProjectionMatrix(); }
+    renderer.setViewport(0, 0, size.x, size.y);
+    renderer.render(scene, camera);
+    return;
+  }
+  const w = size.x / 2, h = size.y;
+  if (camera.aspect !== w / h) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  scene.updateMatrixWorld(true);        // stereo.update reads camera.matrixWorld
+  stereo.update(camera);
+  renderer.setScissorTest(true);
+  renderer.setViewport(0, 0, w, h); renderer.setScissor(0, 0, w, h);
+  renderer.render(scene, stereo.cameraL);
+  renderer.setViewport(w, 0, w, h); renderer.setScissor(w, 0, w, h);
+  renderer.render(scene, stereo.cameraR);
+  renderer.setScissorTest(false);
+}
+
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); checkOrientation(); });
+
+// ============================================================ head tracking
+// Same deviceorientation -> camera mapping as study.html / vantage.html. Not WebXR:
+// Chrome for Android no longer offers immersive-vr on a phone, so Cardboard is done by hand.
+const devQ = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _zee = new THREE.Vector3(0, 0, 1);
+const _q0 = new THREE.Quaternion();
+const _q1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);  // -90 deg about X
+let devAlpha = 0, devBeta = 0, devGamma = 0, haveGyro = false, needsCentre = true;
+
+function screenAngle() {
+  const a = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle
+    : (typeof window.orientation === 'number' ? window.orientation : 0);
+  return a * Math.PI / 180;
+}
+
+function onOrientation(e) {
+  if (e.alpha === null || e.alpha === undefined) return;
+  devAlpha = e.alpha * Math.PI / 180;
+  devBeta  = (e.beta  || 0) * Math.PI / 180;
+  devGamma = (e.gamma || 0) * Math.PI / 180;
+  haveGyro = true;
+}
+
+// Drag to look. With a gyro it only nudges yaw (the phone owns pitch, so dragging
+// it would fight gravity); without one it drives both.
+let dragYaw = 0, dragPitch = 0;
+if (Q.has('look')) { const [y, p] = Q.get('look').split(',').map(Number); dragYaw = y || 0; dragPitch = p || 0; }
+
+function updateHead() {
+  if (haveGyro) {
+    _e.set(devBeta, devAlpha, -devGamma, 'YXZ');
+    devQ.setFromEuler(_e);
+    devQ.multiply(_q1);
+    devQ.multiply(_q0.setFromAxisAngle(_zee, -screenAngle()));
+    if (needsCentre) { recenter(); needsCentre = false; }
+  } else {
+    _e.set(dragPitch, 0, 0, 'YXZ');
+    devQ.setFromEuler(_e);
+  }
+  camera.quaternion.copy(devQ);
+  rig.rotation.y = centreYaw + dragYaw;
+}
+
+// Whatever direction you are physically facing becomes the vantage's intended view.
+// Yaw only: offsetting pitch or roll tilts the horizon away from gravity.
+let centreYaw = 0;
+function recenter() {
+  _e.setFromQuaternion(devQ, 'YXZ');
+  centreYaw = vantageYaw - (haveGyro ? _e.y : 0);
+  dragYaw = 0;
+}
+
+// A tap re-centres (in the viewer that is its one button); a drag looks around.
+let down = null, moved = false;
+addEventListener('pointerdown', e => { if (running) { down = { x: e.clientX, y: e.clientY }; moved = false; } });
+addEventListener('pointermove', e => {
+  if (!down) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y;
+  if (!moved && Math.hypot(dx, dy) < 8) return;
+  moved = true;
+  dragYaw += dx * 0.004;
+  if (!haveGyro) dragPitch = Math.max(-1.4, Math.min(1.4, dragPitch + dy * 0.004));
+  down = { x: e.clientX, y: e.clientY };
+});
+addEventListener('pointerup', () => { if (down && !moved && haveGyro) recenter(); down = null; });
+addEventListener('pointercancel', () => down = null);
+
+// ============================================================ loop
+function tick() {
+  requestAnimationFrame(tick);
+  if (!running) return;
+  updateHead();
+  render();
+}
+requestAnimationFrame(tick);
+
+// ============================================================ device plumbing
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); }
+  catch (e) { wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible' && wakeLock === null) keepAwake();
+});
+
+const $ = id => document.getElementById(id);
+const menuEl = $('menu'), errEl = $('err'), exitEl = $('exit'), hintEl = $('hint'), rotateEl = $('rotate');
+
+function checkOrientation() {
+  rotateEl.classList.toggle('on', running && stereoMode && innerHeight > innerWidth);
+}
+
+async function start(asStereo) {
+  errEl.textContent = '';
+  // iOS only grants motion access from inside a user gesture, so this goes first.
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    let res = 'denied';
+    try { res = await DeviceOrientationEvent.requestPermission(); } catch (e) {}
+    if (res !== 'granted' && asStereo) {
+      errEl.textContent = 'Motion access was refused. On iPhone: Settings > Safari > Motion & Orientation Access, then reload.';
+      return;
+    }
+  }
+  addEventListener('deviceorientation', onOrientation, true);
+
+  stereoMode = asStereo;
+  if (asStereo) {
+    try { await document.documentElement.requestFullscreen(); } catch (e) {}
+    try { await screen.orientation.lock('landscape'); } catch (e) {}
+  }
+  keepAwake();
+
+  needsCentre = true;
+  centreYaw = vantageYaw;
+  menuEl.hidden = true;
+  exitEl.hidden = asStereo;
+  renderer.domElement.style.display = 'block';
+  renderer.setSize(innerWidth, innerHeight);
+  running = true;
+  checkOrientation();
+
+  if (!asStereo) {
+    hintEl.textContent = matchMedia('(pointer: coarse)').matches
+      ? 'move the phone to look around · tap to re-centre'
+      : 'drag to look around';
+    hintEl.style.opacity = 1;
+    setTimeout(() => hintEl.style.opacity = 0, 4000);
+  }
+}
+
+function stop() {
+  running = false;
+  renderer.domElement.style.display = 'none';
+  exitEl.hidden = true; hintEl.style.opacity = 0;
+  menuEl.hidden = false;
+  checkOrientation();
+  try { wakeLock && wakeLock.release(); } catch (e) {}
+  wakeLock = null;
+  try { screen.orientation && screen.orientation.unlock && screen.orientation.unlock(); } catch (e) {}
+  try { document.fullscreenElement && document.exitFullscreen(); } catch (e) {}
+}
+
+// Android's back gesture leaves fullscreen; take that as "done" rather than
+// leaving a half-width stereo view on a normal browser tab.
+document.addEventListener('fullscreenchange', () => {
+  if (running && stereoMode && !document.fullscreenElement) stop();
+});
+
+$('goStereo').onclick = () => start(true);
+$('goMono').onclick = () => start(false);
+exitEl.onclick = stop;
+
+loadRoom().then(() => {
+  placeRig();
+  $('goStereo').textContent = 'Cardboard viewer';
+  $('goStereo').disabled = $('goMono').disabled = false;
+  if (Q.get('start') === 'mono' || Q.get('start') === 'stereo') start(Q.get('start') === 'stereo');
+}).catch(e => {
+  $('goStereo').textContent = 'Cardboard viewer';
+  errEl.textContent = 'Could not load the room: ' + e.message;
+});
+</script>
+
+<script>
+  // Classic script: registration should still happen if the module above fails
+  // to parse on an older phone browser.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(e => console.warn('sw:', e));
+    });
+  }
+</script>
+</body>
+</html>

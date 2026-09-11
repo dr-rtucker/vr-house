@@ -1,2 +1,4 @@
 __pycache__/
 .DS_Store
+# Source phone footage stays local — only the stitched panorama ships.
+*.mp4
