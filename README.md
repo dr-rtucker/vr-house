@@ -12,6 +12,7 @@ static files.
 | `study.html`       | fixed-viewpoint psych study (Cardboard) |
 | `vantage.html`     | one standing spot in the house, look around only (Cardboard or flat) |
 | `office.html`      | a real office rebuilt from a phone video; stand in the middle and look around |
+| `samila.html`      | generative Samila shapes as glitching 3D point clouds (Cardboard or flat) |
 
 `scene-house.js` holds the house geometry, materials and lighting. `house.html`,
 `study.html` and `vantage.html` all import it, so the walkthrough and the study render the
@@ -80,6 +81,20 @@ The source video is not committed (`*.mp4` is gitignored).
 What a box can't do: furniture is painted onto the walls and floor rather than
 standing in the room, so it looks right from the vantage and only there — which is
 why you can't walk. Nobody filmed the ceiling, so it is a flat tone.
+
+## The Samila shapes (`samila.html`)
+
+Five generative shapes (Samila `GenerativeImage`, then a glitch and pixel-sort pass)
+recomputed in the browser as point clouds of ~400k points each — no data files. Depth
+is the formula's own input grid, so straight on each shape is the original picture.
+The glitch is the band shift from `glitch_this`, redone live as sliding slabs, on
+noise-driven timing rather than a fixed beat. Same Cardboard / flat viewer as the vantage demo;
+hold to move to the next shape.
+
+Dev flags: `?shape=1..5`, `&place=front|inside`, `&start=mono|stereo`, `&t=`, `&seed=`,
+`&look=yaw,pitch`, `&glitch=0..1`, `&freeze`. `?record&loop=S` is for rendering a
+seamless wallpaper loop with `../scripts/08_render_samila_loop.py` and does nothing
+useful on the live site.
 
 ## The study (`study.html`)
 

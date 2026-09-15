@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="./samila.webmanifest">
+<link rel="icon" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Samila Shapes</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #e8e0d4;
+               font: 400 15px/1.5 system-ui, -apple-system, sans-serif;
+               -webkit-text-size-adjust: 100%; touch-action: none; }
+  canvas { display: block; }
+  .panel { position: fixed; inset: 0; z-index: 5; overflow-y: auto; background: #0b0a09;
+           padding: max(24px, env(safe-area-inset-top)) 24px 32px; }
+  .panel[hidden] { display: none !important; }
+  .wrap { max-width: 460px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  h2 { font-size: 13px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase;
+       color: #7d7568; margin: 22px 0 8px; }
+  p, li { color: #a49b8d; font-size: 13.5px; }
+  button { font: 500 15px/1.4 system-ui, sans-serif; padding: 14px 22px; border: 0; border-radius: 999px;
+           background: #f0e9df; color: #191512; cursor: pointer; margin-top: 18px; width: 100%; }
+  button.sec { background: #2a251e; color: #e8e0d4; margin-top: 10px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .seg button { width: auto; flex: 1 1 auto; margin: 0; padding: 9px 12px; font-size: 13.5px;
+                background: #1d1a15; color: #c9c0b2; border-radius: 10px; }
+  .seg button.on { background: #f0e9df; color: #191512; }
+  .err { color: #e2a08a; font-size: 13px; margin-top: 12px; min-height: 1.2em; }
+  #rotate { position: fixed; inset: 0; z-index: 9; background: #000; display: none;
+            align-items: center; justify-content: center; text-align: center; padding: 30px; }
+  #rotate.on { display: flex; }
+  /* Flat view only: in stereo a DOM element spans both eyes and reads as double vision. */
+  #exit { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 10px; z-index: 6;
+          width: auto; margin: 0; padding: 8px 14px; font-size: 13px; background: #000a; color: #e8e0d4; }
+  #hint { position: fixed; left: 0; right: 0; bottom: max(14px, env(safe-area-inset-bottom)); z-index: 6;
+          text-align: center; color: #e8e0d4; pointer-events: none; text-shadow: 0 1px 4px #000;
+          font-size: 13px; transition: opacity 1s; }
+</style>
+</head>
+<body>
+
+<div class="panel" id="menu"><div class="wrap">
+  <h1>Samila shapes, in depth</h1>
+  <p>The five midterm shapes, recomputed point by point. Seen straight on, each one
+     is the original picture. The depth you see in the viewer was always in the
+     formula; the print just flattened it.</p>
+
+  <h2>Shape</h2>
+  <div class="seg" id="shapeSeg"></div>
+
+  <h2>Where you stand</h2>
+  <div class="seg" id="placeSeg">
+    <button data-place="front" class="on">In front</button>
+    <button data-place="inside">Inside it</button>
+  </div>
+
+  <button id="goStereo">Cardboard viewer</button>
+  <button class="sec" id="goMono">Just the screen</button>
+  <div class="err" id="err"></div>
+
+  <ul>
+    <li>Tap (the viewer's button) to re-centre on whatever is in front of you.</li>
+    <li>Hold for a second to move on to the next shape.</li>
+    <li>On a laptop: drag to look, keys 1–5 switch shape, F / I switch where you stand.</li>
+    <li>On iPhone, launch this from the home-screen icon, not from Safari.</li>
+  </ul>
+</div></div>
+
+<button id="exit" hidden>Exit</button>
+<div id="hint"></div>
+<div id="rotate">Turn the phone sideways<br>(landscape) to continue.</div>
+
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.min.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ============================================================ the shapes
+// f1/f2 are copied from MIDTERM_NOTEBOOK_2.ipynb. Samila calls random.seed(seed)
+// before *every* grid point, so each random.uniform() there was one constant for the
+// whole image, not noise. The seeds were never saved; c1/c2 were recovered by
+// rendering candidates and correlating them against the un-glitched originals in
+// Images_2/Shapes/ (fit correlations 0.67-0.79; shapes 1, 2, 5 match line for line).
+const floor = Math.floor, sin = Math.sin, cos = Math.cos, abs = Math.abs, PI = Math.PI;
+// Python's round() is round-half-to-even; Math.round is not.
+const pyRound = v => { const r = Math.round(v); return (abs(v % 1) === 0.5 && r % 2) ? r - 1 : r; };
+const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+
+const SHAPES = [
+  { name: 'veils', c1: -0.2650, c2: 0.4150, glitch: 0.6929, alpha: 0.10,
+    f1: (x, y, c) => c * x ** 2 - sin(y ** 2) + abs(y - x),
+    f2: (x, y, c) => c * y ** 3 - cos(x ** 2) + 2 * x,
+    bg: [0.95, 0.95, 0.95],
+    palette: [[0.1, 0.2, 0.5], [0.8, 0.6, 0.1], [0, 0, 0], [0.2, 0.7, 0.3], [0.5, 0.3, 0.7], rgb('#f0e68c')] },
+  { name: 'columns', c1: -0.0200, c2: 0.1575, glitch: 2.163198, alpha: 0.10,
+    f1: (x, y, c) => c * sin(PI * (x - y)) - sin(x ** 2 + y ** 2),
+    f2: (x, y, c) => { const r = Math.sqrt(x ** 2 + y ** 2); return c * sin(PI * r) + (x + y) * Math.exp(-r); },
+    bg: rgb('#f2f2f2'),
+    palette: [[0.1, 0.2, 0.5], [0.7, 0.6, 0.2], [0, 0, 0], [0.5, 0.8, 0.2], [0.8, 0.3, 0.5], rgb('#f2f2f2')] },
+  { name: 'static', c1: -0.0275, c2: -0.4925, glitch: 4.1292305091, alpha: 0.22,
+    f1: (x, y, c) => c * sin(x ** 2 + y ** 2) - cos(10 * (x ** 2 + y ** 2)) + abs(sin(x) - sin(y)),
+    f2: (x, y, c) => c * floor(y ** 3) - cos(PI * x ** 2) + 2 * abs(x - pyRound(y)),
+    bg: [0.1, 0.2, 0.3],
+    palette: [[0.1, 0.2, 0.3], [0.9, 0.1, 0.1], [1, 0.843, 0], [0.2, 0.8, 0.2], [0.5, 0.1, 0.5], rgb('#08f7fe')] },
+  { name: 'scatter', c1: -0.9750, c2: 0.7550, glitch: 6.721912, alpha: 0.30,
+    f1: (x, y, c) => c * sin(floor(x ** 2)) - cos(floor(y ** 2)) + abs(floor(y) - floor(x)),
+    f2: (x, y, c) => c * cos(floor(y ** 3)) - sin(floor(x ** 2)) + 2 * floor(x),
+    bg: [0.1, 0.1, 0.2],
+    palette: [[0.1, 0.1, 0.2], [0.9, 0.1, 0.3], [0.2, 0.7, 0.3], [0.1, 0.6, 0.8], [0.8, 0.5, 0.1], rgb('#f2ed6f')] },
+  { name: 'diamond', c1: -0.1650, c2: -0.2950, glitch: 8.54219, alpha: 0.22,
+    f1: (x, y, c) => cos(x ** 2) * sin(y ** 2) + c * Math.sqrt(abs(x * y)),
+    f2: (x, y, c) => sin(x ** 2) * cos(y ** 2) + c * Math.sqrt(abs(y - x)),
+    bg: [0.1, 0.1, 0.2],
+    palette: [[0.9, 0.3, 0.3], [0.2, 0.8, 0.8], [0, 0, 0], [0.3, 0.7, 0.3], [0.8, 0.5, 0.2], rgb('#8a2be2')] },
+];
+
+// Samila's float_range: accumulate the step rather than multiply, so the grid
+// carries the same rounding drift the originals were drawn with.
+const GRID = [];
+for (let v = -PI; v < PI; v += 0.01) GRID.push(v);
+
+// Where the piece sits (metres; you stand at the origin). W = half-width = half-height,
+// DEPTH = half of its depth, D = how far ahead its centre is.
+const PLACES = {
+  front:  { D: 2.3, W: 1.5, DEPTH: 1.0 },
+  inside: { D: 0.0, W: 1.9, DEPTH: 2.4 },
+};
+const EYE = 1.6, EYE_SEP = 0.064, REF_DIST = 2.3;
+
+const Q = new URLSearchParams(location.search);
+let shapeIdx = Math.max(0, Math.min(4, (parseInt(Q.get('shape')) || 1) - 1));
+let placeKey = Q.get('place') === 'inside' ? 'inside' : 'front';
+// ?d= overrides how far ahead the piece's centre sits (0 = you stand at its centre).
+if (Q.has('d')) PLACES[placeKey].D = parseFloat(Q.get('d'));
+
+// ============================================================ renderer + camera
+// ?record renders frames on a fixed clock and POSTs them to /frame, for
+// scripts/08_render_samila_loop.py to encode (the wallpaper video).
+const RECORD = Q.has('record');
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: RECORD });
+renderer.setPixelRatio(RECORD ? 1 : Math.min(devicePixelRatio, 2));
+function fitRenderer() {
+  if (RECORD) renderer.setSize(parseInt(Q.get('w')) || 1920, parseInt(Q.get('h')) || 1080, false);
+  else renderer.setSize(innerWidth, innerHeight);
+}
+fitRenderer();
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.domElement.style.display = 'none';
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const rig = new THREE.Group();
+const camera = new THREE.PerspectiveCamera(72, 1, 0.05, 60);
+rig.add(camera);
+camera.position.y = EYE;
+scene.add(rig);
+
+const stereo = new THREE.StereoCamera();
+stereo.eyeSep = EYE_SEP;
+let stereoMode = false, running = false;
+
+// ============================================================ the point cloud
+// Glitch slabs mirror glitch_this: a horizontal band of the image slides sideways and
+// wraps around. Here a band can also slide in depth.
+const MAX_SLABS = 10;
+const uniforms = {
+  uTheta:  { value: 0 },
+  uDepth:  { value: 1 },
+  uW:      { value: 1.5 },
+  uCenter: { value: new THREE.Vector3(0, EYE, -2.3) },
+  uSize:   { value: 1.3 },
+  uPR:     { value: renderer.getPixelRatio() },
+  uAlpha:  { value: 0.1 },
+  uRef:    { value: REF_DIST },
+  uSlab:   { value: Array.from({ length: MAX_SLABS }, () => new THREE.Vector4(0, 0, 0, 0)) },
+};
+
+const material = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  vertexShader: /* glsl */`
+    attribute vec2 aGrid;
+    attribute vec3 aColor;
+    uniform float uTheta, uDepth, uW, uSize, uPR, uAlpha, uRef;
+    uniform vec3 uCenter;
+    uniform vec4 uSlab[${MAX_SLABS}];
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() {
+      float x = position.x, y = position.y;
+      // Depth is the formula's own input: the grid point (x, y) that produced this
+      // pixel. uTheta turns which mix of the two inputs faces you. Seen head-on the
+      // picture is unchanged, whatever uTheta is.
+      float c = cos(uTheta), s = sin(uTheta);
+      float z = (aGrid.x * c + aGrid.y * s) / (abs(c) + abs(s));
+      for (int i = 0; i < ${MAX_SLABS}; i++) {
+        vec4 sl = uSlab[i];
+        if (sl.y > 0.0 && abs(y - sl.x) < sl.y) { x = mod(x + sl.z + 1.0, 2.0) - 1.0; z += sl.w; }
+      }
+      vec4 mv = viewMatrix * vec4(uCenter + vec3(x * uW, y * uW, z * uDepth), 1.0);
+      gl_Position = projectionMatrix * mv;
+      float dist = -mv.z;
+      float px = uSize * uPR * uRef / max(dist, 0.05);
+      float a = uAlpha;
+      // A point can't be drawn smaller than a pixel, so shrink its ink instead.
+      if (px < 1.0) { a *= px * px; px = 1.0; }
+      px = min(px, 4.0 * uPR);
+      a *= smoothstep(0.12, 0.5, dist);   // points passing through your head would flash
+      gl_PointSize = px;
+      vColor = aColor;
+      vAlpha = a;
+    }`,
+  fragmentShader: /* glsl */`
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() { gl_FragColor = vec4(vColor, vAlpha); }`,
+});
+
+let points = null;
+function buildShape(idx) {
+  const sh = SHAPES[idx];
+  const n = GRID.length, total = n * n;
+  const d1 = new Float64Array(total), d2 = new Float64Array(total);
+  const pos = new Float32Array(total * 3), grid = new Float32Array(total * 2), col = new Float32Array(total * 3);
+  let k = 0;
+  // itertools.product(range1, range1): first input outer, second inner.
+  for (let i = 0; i < n; i++) {
+    const x = GRID[i];
+    for (let j = 0; j < n; j++) {
+      const y = GRID[j];
+      d1[k] = sh.f1(x, y, sh.c1);
+      d2[k] = sh.f2(x, y, sh.c2);
+      grid[2 * k] = x / PI; grid[2 * k + 1] = y / PI;
+      k++;
+    }
+  }
+  const range = a => { let lo = Infinity, hi = -Infinity; for (const v of a) if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } return [lo, hi]; };
+  const [lo1, hi1] = range(d1), [lo2, hi2] = range(d2);
+  for (let p = 0; p < total; p++) {
+    // Samila plots data2 across and data1 up, each axis stretched to fill the square.
+    pos[3 * p]     = 2 * (d2[p] - lo2) / (hi2 - lo2) - 1;
+    pos[3 * p + 1] = 2 * (d1[p] - lo1) / (hi1 - lo1) - 1;
+    // Colour = data2 through a 6-colour ListedColormap, normalised min..max.
+    const band = Math.min(5, floor((d2[p] - lo2) / (hi2 - lo2) * 6));
+    const cc = sh.palette[band] || sh.palette[5];
+    col[3 * p] = cc[0]; col[3 * p + 1] = cc[1]; col[3 * p + 2] = cc[2];
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aGrid', new THREE.BufferAttribute(grid, 2));
+  geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+
+  if (points) { scene.remove(points); points.geometry.dispose(); }
+  points = new THREE.Points(geo, material);
+  points.frustumCulled = false;   // the shader moves every point; the bounding sphere is fiction
+  scene.add(points);
+
+  scene.background = new THREE.Color().setRGB(...sh.bg, THREE.SRGBColorSpace);
+  uniforms.uAlpha.value = sh.alpha;
+  resetGlitch();
+}
+
+function applyPlace() {
+  const pl = PLACES[placeKey];
+  uniforms.uW.value = pl.W;
+  uniforms.uCenter.value.set(0, EYE, -pl.D);
+}
+
+// ============================================================ slow modulation
+// Everything drifts on smooth value noise, never on a fixed period: calm spells,
+// then bursts, with no beat to lock onto.
+let rngState = (parseInt(Q.get('seed')) || (Date.now() & 0xffffff)) >>> 0;
+const noiseSeed = rngState % 9973;
+function rand() {   // mulberry32
+  rngState |= 0; rngState = (rngState + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+function hash1(n) { const s = sin(n * 127.1 + noiseSeed * 311.7) * 43758.5453; return s - floor(s); }
+// Value noise; with a period, the lattice wraps so the noise repeats exactly.
+function vnoise(t, period, salt) {
+  const i = floor(t), f = t - i, u = f * f * (3 - 2 * f);
+  const a = period ? ((i % period) + period) % period : i;
+  const b = period ? (((i + 1) % period) + period) % period : i + 1;
+  return hash1(a + salt * 1013) * (1 - u) + hash1(b + salt * 1013) * u;
+}
+// ?loop=S makes every modulation periodic in S seconds, so a rendered video loops
+// with no seam: each octave's lattice then fits a whole number of times into S.
+const LOOP = parseFloat(Q.get('loop')) || 0;
+function fbm(t, S, k) {   // S = rough timescale in seconds
+  if (!LOOP) return 0.6 * vnoise(t / S, 0, k) + 0.3 * vnoise(t / S * 2.03, 0, k + 50) + 0.1 * vnoise(t / S * 4.1, 0, k + 90);
+  const n = Math.max(1, Math.round(LOOP / S)), u = t / LOOP * n;
+  return 0.6 * vnoise(u, n, k) + 0.3 * vnoise(2 * u, 2 * n, k + 50) + 0.1 * vnoise(4 * u, 4 * n, k + 90);
+}
+// The steady turn has to come back round to where it started, too.
+const DRIFT = LOOP ? 2 * PI * Math.round(0.012 * LOOP / (2 * PI)) / LOOP : 0.012;
+const smooth = (a, b, v) => { const t = Math.max(0, Math.min(1, (v - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// ?glitch=0..1 pins the intensity, for checking the effect without waiting for a burst.
+const PINNED_GLITCH = Q.has('glitch') ? parseFloat(Q.get('glitch')) : null;
+function glitchIntensity(t) { return PINNED_GLITCH ?? smooth(0.42, 0.8, fbm(t, 19, 3)); }
+
+function makeSlab(t, I) {
+  // glitch_this's max offset is (amount^2 / 100) of the width; the floor keeps
+  // shape 1, glitched at only 0.69, from sitting perfectly still.
+  const maxDx = Math.min(2, Math.max(0.03, 2 * SHAPES[shapeIdx].glitch ** 2 / 100));
+  return {
+    yc: rand() * 2 - 1,
+    hh: 0.004 + rand() ** 1.6 * 0.25,          // band height 1px .. a quarter of the image
+    dx: (rand() * 2 - 1) * maxDx * (0.3 + 0.7 * I),
+    dz: (rand() * 2 - 1) * 0.7 * I,
+    born: t,
+    life: 0.25 + rand() ** 2 * 5,
+  };
+}
+
+// Live: slabs spawn as time runs. Loop mode: the glitch is a pure function of time,
+// a fixed list of events over one loop where one running past the end carries on
+// at the start.
+const slabs = [];   // { yc, hh, dx, dz, born, life }
+let loopEvents = [];
+function resetGlitch() {
+  slabs.length = 0;
+  loopEvents = [];
+  if (!LOOP) return;
+  const dt = 1 / 30;
+  for (let s = 0; s < LOOP; s += dt) {
+    const live = loopEvents.filter(e => s - e.born < e.life).length;
+    const I = glitchIntensity(s);
+    if (live < MAX_SLABS && rand() < dt * 2.8 * I) loopEvents.push(makeSlab(s, I));
+  }
+}
+
+function stepGlitch(t, dt) {
+  let active;
+  if (LOOP) {
+    const tl = ((t % LOOP) + LOOP) % LOOP;
+    active = [];
+    for (const e of loopEvents) {
+      let age = tl - e.born;
+      if (age < 0) age += LOOP;
+      if (age < e.life) active.push({ s: e, age });
+      if (active.length === MAX_SLABS) break;
+    }
+  } else {
+    const I = glitchIntensity(t);
+    if (slabs.length < MAX_SLABS && rand() < dt * 2.8 * I) slabs.push(makeSlab(t, I));
+    for (let i = slabs.length - 1; i >= 0; i--) if (t - slabs[i].born > slabs[i].life) slabs.splice(i, 1);
+    active = slabs.map(s => ({ s, age: t - s.born }));
+  }
+  for (let i = 0; i < MAX_SLABS; i++) {
+    const a = active[i], u = uniforms.uSlab.value[i];
+    if (!a) { u.set(0, 0, 0, 0); continue; }
+    // Snap in and out over a few frames: a glitch, not a slide.
+    const { s, age } = a, env = smooth(0, 0.06, age) * (1 - smooth(s.life - 0.06, s.life, age));
+    u.set(s.yc, s.hh, s.dx * env, s.dz * env);
+  }
+}
+
+function stepModulation(t) {
+  // Which mix of the two inputs faces you wanders, stalls, and doubles back.
+  uniforms.uTheta.value = 3 * PI * (fbm(t, 70, 1) - 0.5) + t * DRIFT;
+  uniforms.uDepth.value = PLACES[placeKey].DEPTH * (0.45 + 0.9 * fbm(t, 37, 2));
+}
+
+// ============================================================ render
+const size = new THREE.Vector2();
+function render() {
+  renderer.getSize(size);
+  if (!stereoMode) {
+    if (camera.aspect !== size.x / size.y) { camera.aspect = size.x / size.y; camera.updateProjectionMatrix(); }
+    renderer.setViewport(0, 0, size.x, size.y);
+    renderer.render(scene, camera);
+    return;
+  }
+  const w = size.x / 2, h = size.y;
+  if (camera.aspect !== w / h) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  scene.updateMatrixWorld(true);
+  stereo.update(camera);
+  renderer.setScissorTest(true);
+  renderer.setViewport(0, 0, w, h); renderer.setScissor(0, 0, w, h);
+  renderer.render(scene, stereo.cameraL);
+  renderer.setViewport(w, 0, w, h); renderer.setScissor(w, 0, w, h);
+  renderer.render(scene, stereo.cameraR);
+  renderer.setScissorTest(false);
+}
+
+addEventListener('resize', () => { fitRenderer(); checkOrientation(); });
+
+// ============================================================ head tracking
+// Same deviceorientation -> camera mapping as vantage.html / study.html.
+const devQ = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _zee = new THREE.Vector3(0, 0, 1);
+const _q0 = new THREE.Quaternion();
+const _q1 = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);
+let devAlpha = 0, devBeta = 0, devGamma = 0, haveGyro = false, needsCentre = true;
+
+function screenAngle() {
+  const a = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle
+    : (typeof window.orientation === 'number' ? window.orientation : 0);
+  return a * PI / 180;
+}
+function onOrientation(e) {
+  if (e.alpha === null || e.alpha === undefined) return;
+  devAlpha = e.alpha * PI / 180;
+  devBeta  = (e.beta  || 0) * PI / 180;
+  devGamma = (e.gamma || 0) * PI / 180;
+  haveGyro = true;
+}
+
+let dragYaw = 0, dragPitch = 0;
+if (Q.has('look')) { const [y, p] = Q.get('look').split(',').map(Number); dragYaw = y || 0; dragPitch = p || 0; }
+
+let centreYaw = 0;
+function updateHead() {
+  if (haveGyro) {
+    _e.set(devBeta, devAlpha, -devGamma, 'YXZ');
+    devQ.setFromEuler(_e);
+    devQ.multiply(_q1);
+    devQ.multiply(_q0.setFromAxisAngle(_zee, -screenAngle()));
+    if (needsCentre) { recenter(); needsCentre = false; }
+  } else {
+    _e.set(dragPitch, 0, 0, 'YXZ');
+    devQ.setFromEuler(_e);
+  }
+  camera.quaternion.copy(devQ);
+  rig.rotation.y = centreYaw + dragYaw;
+}
+function recenter() {
+  _e.setFromQuaternion(devQ, 'YXZ');
+  centreYaw = -(haveGyro ? _e.y : 0);
+  dragYaw = 0;
+}
+
+// Tap = re-centre; hold = next shape (the viewer's one button can do both); drag = look.
+let down = null, moved = false;
+addEventListener('pointerdown', e => { if (running) { down = { x: e.clientX, y: e.clientY, t: performance.now() }; moved = false; } });
+addEventListener('pointermove', e => {
+  if (!down) return;
+  const dx = e.clientX - down.x, dy = e.clientY - down.y;
+  if (!moved && Math.hypot(dx, dy) < 8) return;
+  moved = true;
+  dragYaw += dx * 0.004;
+  if (!haveGyro) dragPitch = Math.max(-1.4, Math.min(1.4, dragPitch + dy * 0.004));
+  down.x = e.clientX; down.y = e.clientY;
+});
+addEventListener('pointerup', () => {
+  if (down && !moved) {
+    if (performance.now() - down.t > 700) setShape((shapeIdx + 1) % SHAPES.length);
+    else if (haveGyro) recenter();
+  }
+  down = null;
+});
+addEventListener('pointercancel', () => down = null);
+
+addEventListener('keydown', e => {
+  if (!running) return;
+  if (e.key >= '1' && e.key <= '5') setShape(+e.key - 1);
+  if (e.key === 'f' || e.key === 'i') { placeKey = e.key === 'f' ? 'front' : 'inside'; applyPlace(); flash(placeKey === 'front' ? 'in front' : 'inside it'); }
+});
+
+// ============================================================ loop
+// ?t=N starts the clock at N seconds (replaying the glitch history so it is
+// deterministic with ?seed=), for screenshot checks.
+let clock = parseFloat(Q.get('t')) || 0;
+let prevT = 0;
+function tick(now) {
+  requestAnimationFrame(tick);
+  if (!running || RECORD) return;
+  const dt = prevT ? Math.min((now - prevT) / 1000, 0.05) : 0;
+  prevT = now;
+  if (!Q.has('freeze')) clock += dt;
+  updateHead();
+  stepModulation(clock);
+  stepGlitch(clock, Q.has('freeze') ? 0 : dt);
+  render();
+}
+requestAnimationFrame(tick);
+
+// One frame at a time on a fixed clock, however long each takes to render, so the
+// video plays back at true speed. Raw RGBA, bottom row first (ffmpeg flips it).
+async function record() {
+  const fps = parseFloat(Q.get('fps')) || 30;
+  const frames = parseInt(Q.get('frames')) || Math.round((LOOP || 10) * fps);
+  const gl = renderer.getContext(), w = renderer.domElement.width, h = renderer.domElement.height;
+  const buf = new Uint8Array(w * h * 4);
+  for (let f = 0; f < frames; f++) {
+    clock = f / fps;
+    updateHead();
+    stepModulation(clock);
+    stepGlitch(clock, 1 / fps);
+    render();
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    await fetch(`/frame?i=${f}&n=${frames}`, { method: 'POST', body: buf });
+  }
+  await fetch('/done', { method: 'POST' });
+}
+
+// ============================================================ device plumbing
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); }
+  catch (e) { wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (running && document.visibilityState === 'visible' && wakeLock === null) keepAwake();
+});
+
+const $ = id => document.getElementById(id);
+const menuEl = $('menu'), errEl = $('err'), exitEl = $('exit'), hintEl = $('hint'), rotateEl = $('rotate');
+
+function flash(text) {
+  if (stereoMode) return;
+  hintEl.textContent = text; hintEl.style.opacity = 1;
+  clearTimeout(flash.t); flash.t = setTimeout(() => hintEl.style.opacity = 0, 2500);
+}
+
+function setShape(idx) {
+  shapeIdx = idx;
+  buildShape(idx);
+  for (const b of shapeSeg.children) b.classList.toggle('on', +b.dataset.idx === idx);
+  flash(`${idx + 1} · ${SHAPES[idx].name}`);
+}
+
+const shapeSeg = $('shapeSeg');
+SHAPES.forEach((sh, i) => {
+  const b = document.createElement('button');
+  b.textContent = `${i + 1} · ${sh.name}`;
+  b.dataset.idx = i;
+  b.onclick = () => { shapeIdx = i; for (const o of shapeSeg.children) o.classList.toggle('on', o === b); };
+  shapeSeg.appendChild(b);
+});
+shapeSeg.children[shapeIdx].classList.add('on');
+for (const b of $('placeSeg').children) {
+  b.classList.toggle('on', b.dataset.place === placeKey);
+  b.onclick = () => { placeKey = b.dataset.place; for (const o of $('placeSeg').children) o.classList.toggle('on', o === b); };
+}
+
+function checkOrientation() {
+  rotateEl.classList.toggle('on', running && stereoMode && innerHeight > innerWidth);
+}
+
+async function start(asStereo) {
+  errEl.textContent = '';
+  // iOS only grants motion access from inside a user gesture, so this goes first.
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    let res = 'denied';
+    try { res = await DeviceOrientationEvent.requestPermission(); } catch (e) {}
+    if (res !== 'granted' && asStereo) {
+      errEl.textContent = 'Motion access was refused. On iPhone: Settings > Safari > Motion & Orientation Access, then reload.';
+      return;
+    }
+  }
+  addEventListener('deviceorientation', onOrientation, true);
+
+  stereoMode = asStereo;
+  if (asStereo) {
+    try { await document.documentElement.requestFullscreen(); } catch (e) {}
+    try { await screen.orientation.lock('landscape'); } catch (e) {}
+  }
+  keepAwake();
+
+  applyPlace();
+  buildShape(shapeIdx);   // clears the glitch, so the ?t= replay has to come after it
+  if (clock > 0) for (let s = Math.max(0, clock - 12); s < clock; s += 1 / 60) stepGlitch(s, 1 / 60);
+  needsCentre = true;
+  centreYaw = 0;
+  menuEl.hidden = true;
+  exitEl.hidden = asStereo;
+  renderer.domElement.style.display = 'block';
+  fitRenderer();
+  running = true; prevT = 0;
+  checkOrientation();
+
+  if (RECORD) { exitEl.hidden = true; hintEl.hidden = true; record(); return; }
+
+  if (!asStereo) flash(matchMedia('(pointer: coarse)').matches
+    ? 'move the phone to look · tap to re-centre · hold for the next shape'
+    : 'drag to look · keys 1–5 switch shape');
+}
+
+function stop() {
+  running = false;
+  renderer.domElement.style.display = 'none';
+  exitEl.hidden = true; hintEl.style.opacity = 0;
+  menuEl.hidden = false;
+  checkOrientation();
+  try { wakeLock && wakeLock.release(); } catch (e) {}
+  wakeLock = null;
+  try { screen.orientation && screen.orientation.unlock && screen.orientation.unlock(); } catch (e) {}
+  try { document.fullscreenElement && document.exitFullscreen(); } catch (e) {}
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (running && stereoMode && !document.fullscreenElement) stop();
+});
+
+$('goStereo').onclick = () => start(true);
+$('goMono').onclick = () => start(false);
+exitEl.onclick = stop;
+
+if (Q.get('start') === 'mono' || Q.get('start') === 'stereo') start(Q.get('start') === 'stereo');
+</script>
+<script>
+  // Classic script: registration should still happen if the module above fails
+  // to parse on an older phone browser.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(e => console.warn('sw:', e));
+    });
+  }
+</script>
+</body>
+</html>

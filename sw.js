@@ -3,7 +3,7 @@
 // Cache-first on purpose: once the house is on the phone it should load with no
 // network at all — on a plane, in a basement, on someone else's wifi. The cost is
 // that updates only land when CACHE bumps, so bump the version on every deploy.
-const CACHE = 'vr-house-v4';
+const CACHE = 'vr-house-v5';
 
 const PRECACHE = [
   './',
@@ -27,6 +27,8 @@ const PRECACHE = [
   './rooms/office/wall_e.jpg',
   './rooms/office/floor.jpg',
   './rooms/office/ceiling.jpg',
+  './samila.html',
+  './samila.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/maskable-512.png',
